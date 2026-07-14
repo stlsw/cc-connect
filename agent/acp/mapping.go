@@ -34,6 +34,11 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 	switch head.SessionUpdate {
 	case "agent_message_chunk":
 		return mapAgentMessageChunk(sid, wrap.Update)
+	case "agent_thought_chunk", "agent_thinking_chunk", "thinking", "reasoning", "reasoning_chunk":
+		// Map reasoning/thinking to EventThinking so quiet mode can suppress it.
+		// Grok ACP uses agent_thought_chunk; without this it falls through to
+		// EventText and shows up in chat even with thinking_messages=false.
+		return mapSessionUpdateFallback(sid, "agent_thinking_chunk", wrap.Update)
 	case "tool_call":
 		return mapToolCall(sid, wrap.Update)
 	case "tool_call_update":
