@@ -5251,9 +5251,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
-					if sp.canPreview() && sp.appendSeparator("\n\n") {
-						textParts = append(textParts, "\n\n")
+					// One separator per text segment only (advance segmentStart),
+					// otherwise every thinking chunk stacks "\n\n" and Telegram
+					// shows huge blank gaps (common with ACP agents like Grok).
+					if sp.canPreview() && sp.appendSeparator("\n") {
+						textParts = append(textParts, "\n")
 					}
+					segmentStart = len(textParts)
 				} else {
 					if sp.canPreview() {
 						sp.freeze()
@@ -5338,9 +5342,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			//   compact: freeze+detach to split text into separate cards
 			if !e.display.ToolMessages && len(textParts) > segmentStart {
 				if e.display.Mode == "quiet" {
-					if sp.canPreview() && sp.appendSeparator("\n\n") {
-						textParts = append(textParts, "\n\n")
+					// One separator per text segment only (advance segmentStart),
+					// otherwise every tool call stacks "\n\n" and Telegram shows
+					// huge blank gaps between short status lines (ACP/Grok).
+					if sp.canPreview() && sp.appendSeparator("\n") {
+						textParts = append(textParts, "\n")
 					}
+					segmentStart = len(textParts)
 				} else {
 					if sp.canPreview() {
 						sp.freeze()
