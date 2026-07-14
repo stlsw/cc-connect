@@ -1,0 +1,198 @@
+# Sync this fork with chenhg5/cc-connect and keep patch/quiet-acp on top.
+#
+# - Daily schedule + manual workflow_dispatch
+# - Rebases (default) or merges upstream/main into patch/quiet-acp
+# - Fast-forwards fork main to match upstream/main
+# - Opens a GitHub Issue if the quiet patches conflict with upstream
+#
+# NOTE: Scheduled workflows only run from the repository default branch.
+# This fork should use patch/quiet-acp as the default branch (see docs).
+
+name: Sync upstream
+
+on:
+  schedule:
+    # Daily 08:00 UTC
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: "How to apply upstream/main onto patch/quiet-acp"
+        type: choice
+        options:
+          - rebase
+          - merge
+        default: rebase
+      sync_main:
+        description: "Also point fork main at upstream/main"
+        type: boolean
+        default: true
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    name: Sync patch/quiet-acp
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Need full history for rebase; token must allow push
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/chenhg5/cc-connect.git
+          git fetch upstream --tags
+          git fetch origin
+          echo "upstream/main = $(git rev-parse upstream/main)"
+          echo "origin/patch/quiet-acp = $(git rev-parse origin/patch/quiet-acp 2>/dev/null || echo missing)"
+
+      - name: Sync patch/quiet-acp with upstream/main
+        id: patch
+        env:
+          STRATEGY: ${{ github.event.inputs.strategy || 'rebase' }}
+        run: |
+          set -euo pipefail
+
+          git checkout -B patch/quiet-acp origin/patch/quiet-acp 2>/dev/null \
+            || git checkout patch/quiet-acp
+
+          BEFORE="$(git rev-parse HEAD)"
+          UPSTREAM="$(git rev-parse upstream/main)"
+          echo "before=$BEFORE" >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$UPSTREAM" HEAD; then
+            echo "already_up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "patch/quiet-acp already contains upstream/main"
+            exit 0
+          fi
+          echo "already_up_to_date=false" >> "$GITHUB_OUTPUT"
+
+          if [ "$STRATEGY" = "merge" ]; then
+            if git merge --no-edit -m "chore: merge upstream/main into patch/quiet-acp" upstream/main; then
+              echo "method=merge" >> "$GITHUB_OUTPUT"
+              echo "conflict=false" >> "$GITHUB_OUTPUT"
+            else
+              git merge --abort || true
+              echo "method=merge" >> "$GITHUB_OUTPUT"
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+              echo "::error::Merge conflict with upstream/main"
+              exit 1
+            fi
+          else
+            if git rebase upstream/main; then
+              echo "method=rebase" >> "$GITHUB_OUTPUT"
+              echo "conflict=false" >> "$GITHUB_OUTPUT"
+            else
+              git rebase --abort || true
+              echo "method=rebase" >> "$GITHUB_OUTPUT"
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+              echo "::error::Rebase conflict with upstream/main"
+              exit 1
+            fi
+          fi
+
+          AFTER="$(git rev-parse HEAD)"
+          echo "after=$AFTER" >> "$GITHUB_OUTPUT"
+          echo "Updated $BEFORE -> $AFTER (via $STRATEGY)"
+
+      - name: Push patch/quiet-acp
+        if: steps.patch.outputs.already_up_to_date != 'true'
+        env:
+          STRATEGY: ${{ github.event.inputs.strategy || 'rebase' }}
+        run: |
+          set -euo pipefail
+          if [ "$STRATEGY" = "merge" ]; then
+            git push origin patch/quiet-acp
+          else
+            git push --force-with-lease=patch/quiet-acp:patch/quiet-acp origin patch/quiet-acp
+          fi
+          echo "Pushed patch/quiet-acp"
+
+      - name: Sync main to upstream/main
+        if: ${{ github.event_name == 'schedule' || inputs.sync_main }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git fetch upstream main
+          git checkout -B main upstream/main
+          git push --force-with-lease=main:main origin main
+          echo "Fork main now matches upstream/main ($(git rev-parse --short HEAD))"
+          # return to patch branch for any later steps
+          git checkout patch/quiet-acp
+
+      - name: Open issue on conflict
+        if: failure() && steps.patch.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Upstream sync conflict on patch/quiet-acp ($(date -u +%Y-%m-%d))"
+          # Avoid duplicate open issues
+          EXISTING="$(gh issue list --state open --search "Upstream sync conflict in:title" --json number --jq '.[0].number' || true)"
+          if [ -n "${EXISTING:-}" ]; then
+            gh issue comment "$EXISTING" --body "Another sync failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+          # Create label if missing (ignore errors)
+          gh label create "upstream-sync" --description "Automated upstream sync" --color "D93F0B" 2>/dev/null || true
+          gh issue create \
+            --title "$TITLE" \
+            --label "upstream-sync" \
+            --body "$(cat <<EOF
+          Automated sync with \`chenhg5/cc-connect\` (\`upstream/main\`) hit **conflicts** on \`patch/quiet-acp\`.
+
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ### Resolve locally
+
+          \`\`\`bash
+          git clone -b patch/quiet-acp https://github.com/stlsw/cc-connect.git
+          cd cc-connect
+          git remote add upstream https://github.com/chenhg5/cc-connect.git
+          git fetch upstream
+          git rebase upstream/main
+          # fix conflicts in agent/acp/mapping.go and/or core/engine.go
+          git add -A
+          git rebase --continue
+          git push --force-with-lease origin patch/quiet-acp
+          ./scripts/install-local.sh   # on machines that run the daemon
+          \`\`\`
+
+          Our maintained patches:
+          1. ACP \`agent_thought_chunk\` → thinking (quiet mode)
+          2. Quiet mode spacing (one separator per segment)
+          EOF
+          )" || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Sync upstream"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| patch already up to date | \`${{ steps.patch.outputs.already_up_to_date }}\` |"
+            echo "| method | \`${{ steps.patch.outputs.method }}\` |"
+            echo "| conflict | \`${{ steps.patch.outputs.conflict }}\` |"
+            echo "| before | \`${{ steps.patch.outputs.before }}\` |"
+            echo "| after | \`${{ steps.patch.outputs.after }}\` |"
+            echo "| upstream/main | \`${{ steps.patch.outputs.upstream }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
