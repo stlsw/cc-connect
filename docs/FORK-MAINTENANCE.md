@@ -29,7 +29,30 @@ git checkout patch/quiet-acp
 
 Installs to `~/.cc-connect/bin/cc-connect` and restarts the LaunchAgent.
 
-## Pull new upstream releases
+## Automation (GitHub Actions)
+
+Workflow: [`.github/workflows/sync-upstream.yml`](../.github/workflows/sync-upstream.yml)
+
+| Trigger | What it does |
+|---------|----------------|
+| **Daily 08:00 UTC** | Rebase `patch/quiet-acp` onto `upstream/main`, push; also point fork `main` at upstream |
+| **Actions → Sync upstream → Run workflow** | Same, optional strategy `rebase` / `merge` |
+
+On **conflict**, the job fails and opens a GitHub Issue titled `Upstream sync conflict…` with fix steps.
+
+**Important:** Scheduled workflows only run from the repo **default branch**. This fork should use `patch/quiet-acp` as default (set once in GitHub settings or `gh repo edit --default-branch patch/quiet-acp`).
+
+**This machine still needs a rebuild** after a successful sync if you want the new upstream code on the daemon:
+
+```bash
+cd /path/to/stlsw/cc-connect
+git pull origin patch/quiet-acp
+./scripts/install-local.sh
+```
+
+(Optional later: a self-hosted runner or SSH deploy action could run `install-local.sh` automatically.)
+
+## Pull new upstream releases (manual)
 
 ```bash
 git checkout patch/quiet-acp
