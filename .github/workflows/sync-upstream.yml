@@ -116,12 +116,19 @@ jobs:
         if: steps.patch.outputs.already_up_to_date != 'true'
         env:
           STRATEGY: ${{ github.event.inputs.strategy || 'rebase' }}
+          # Lease must expect the *pre-rebase* remote tip. Using local ref:local ref after
+          # rebase resolves to the new tip and always rejects with "stale info".
+          BEFORE: ${{ steps.patch.outputs.before }}
         run: |
           set -euo pipefail
           if [ "$STRATEGY" = "merge" ]; then
             git push origin patch/quiet-acp
           else
-            git push --force-with-lease=patch/quiet-acp:patch/quiet-acp origin patch/quiet-acp
+            if [ -z "${BEFORE:-}" ]; then
+              echo "::error::missing BEFORE sha for force-with-lease"
+              exit 1
+            fi
+            git push --force-with-lease=refs/heads/patch/quiet-acp:"$BEFORE" origin HEAD:patch/quiet-acp
           fi
           echo "Pushed patch/quiet-acp"
 
@@ -131,8 +138,14 @@ jobs:
         run: |
           set -euo pipefail
           git fetch upstream main
+          git fetch origin main 2>/dev/null || true
+          EXPECT_MAIN="$(git rev-parse origin/main 2>/dev/null || true)"
           git checkout -B main upstream/main
-          git push --force-with-lease=main:main origin main
+          if [ -n "${EXPECT_MAIN:-}" ]; then
+            git push --force-with-lease=refs/heads/main:"$EXPECT_MAIN" origin HEAD:main
+          else
+            git push -u origin HEAD:main
+          fi
           echo "Fork main now matches upstream/main ($(git rev-parse --short HEAD))"
           # return to patch branch for any later steps
           git checkout patch/quiet-acp
